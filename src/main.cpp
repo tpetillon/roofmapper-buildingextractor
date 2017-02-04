@@ -1,7 +1,10 @@
+#include <cstdint>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <algorithm>
+#include <map>
 
 #include <osmium/io/any_input.hpp>
 
@@ -12,104 +15,147 @@
 
 #include <osmium/osm.hpp>
 
-#include <osmium/area/assembler.hpp>
-#include <osmium/area/multipolygon_collector.hpp>
-
-#include <osmium/index/map/sparse_mem_array.hpp>
-#include <osmium/handler/node_locations_for_ways.hpp>
-
-using index_type = osmium::index::map::SparseMemArray<osmium::unsigned_object_id_type, osmium::Location>;
-using location_handler_type = osmium::handler::NodeLocationsForWays<index_type>;
+#include <osmium/handler.hpp>
 
 int building_way_count = 0;
 int building_area_count = 0;
 int building_count = 0;
 
-osmium::Box mean_location(const osmium::NodeRefList& way) {
-    double min_lon = std::numeric_limits<double>::max();
-    double min_lat = min_lon;
-    double max_lon = std::numeric_limits<double>::lowest();
-    double max_lat = max_lon;
-
-    for (auto& node : way) {
-        auto location = node.location();
-        double lon = location.lon();
-        double lat = location.lat();
-        min_lon = std::min(min_lon, lon);
-        min_lat = std::min(min_lat, lat);
-        max_lon = std::max(max_lon, lon);
-        max_lat = std::max(max_lat, lat);
-    }
-
-    return osmium::Box(min_lon, min_lat, max_lon, max_lat);
-}
-
-osmium::Box mean_location(const osmium::Way& way) {
-    return mean_location(way.nodes());
-}
-
-osmium::Location box_center(const osmium::Box& box) {
-    return osmium::Location(
-        (box.bottom_left().lon() + box.top_right().lon()) / 2.0,
-        (box.bottom_left().lat() + box.top_right().lat()) / 2.0
-    );
-}
-
-struct BuildingWayHandler : public osmium::handler::Handler {
-
-    void way(const osmium::Way& way) {
-        if (way.tags().has_key("building")) {
-            if (way.tags().has_key("roof:material")) {
-                return;
-            }
-
-            building_way_count++;
-            building_count++;
-
-            osmium::Location location = box_center(mean_location(way));
-            std::cout << "way," << way.id() << ',' << way.version() << ',' <<
-                location.lon() << ',' << location.lat() << '\n';
-
-            if (building_count % 100 == 0) {
-                std::cout << std::flush;
-            }
-        }
-    }
+struct BuildingRelation {
+    osmium::object_id_type id;
+    osmium::object_version_type version;
+    osmium::object_id_type first_way_id;
 };
 
-struct BuildingAreaHandler : public osmium::handler::Handler {
+struct BuildingWay {
+    osmium::item_type type;
+    osmium::object_id_type id;
+    osmium::object_version_type version;
+    osmium::object_id_type first_node_id;
+};
 
-    void area(const osmium::Area& area) {
-        if (!area.is_multipolygon()) {
-            return;
-        }
+struct BuildingRelationFilter : public osmium::handler::Handler {
+    BuildingRelationFilter(std::map<osmium::object_id_type, BuildingRelation>& buildingRelations) :
+        m_buildingRelations(buildingRelations) {
+    }
 
-        if (area.tags().has_key("building")) {
-            if (area.tags().has_key("roof:material")) {
-                return;
-            }
-
-            building_area_count++;
-            building_count++;
-
-            osmium::Box box;
-            for (auto& ring : area.outer_rings()) {
-                box.extend(mean_location(ring));
-            }
-            osmium::Location location = box_center(box);
-            std::cout << "relation," << area.orig_id() << ',' << area.version() << ',' <<
-                location.lon() << ',' << location.lat() << '\n';
-
-            if (building_count % 100 == 0) {
-                std::cout << std::flush;
+    void relation(const osmium::Relation& relation) {
+        if (relation_is_multipolygon(relation) &&
+            relation.tags().has_key("building") &&
+            !relation.tags().has_key("roof:material") &&
+            relation.members().size() > 0)
+        {
+            for (auto& member : relation.members()) {
+                if (member.type() == osmium::item_type::way) {
+                    BuildingRelation buildingRelation;
+                    buildingRelation.id = relation.id();
+                    buildingRelation.version = relation.version();
+                    buildingRelation.first_way_id = member.ref();
+                    m_buildingRelations[buildingRelation.first_way_id] = buildingRelation;
+                    break; // only keep the first way
+                }
             }
         }
     }
+
+    bool relation_is_multipolygon(const osmium::Relation& relation) const {
+        const char* type = relation.tags().get_value_by_key("type");
+
+        // ignore relations without "type" tag
+        if (!type) {
+            return false;
+        }
+
+        if (!std::strcmp(type, "multipolygon")) {
+            return true;
+        }
+
+        return false;
+    }
+
+private:
+    std::map<osmium::object_id_type, BuildingRelation>& m_buildingRelations;
+};
+
+struct BuildingWayFilter : public osmium::handler::Handler {
+    BuildingWayFilter(int bin, int bin_count,
+        std::map<osmium::object_id_type, BuildingWay>& buildingWays,
+        const std::map<osmium::object_id_type, BuildingRelation>& buildingRelations) :
+        m_bin(bin), m_bin_count(bin_count), m_buildingWays(buildingWays), m_buildingRelations(buildingRelations) {
+    }
+
+    void way(const osmium::Way& way) {
+        if (way.id() % m_bin_count == m_bin && way.nodes().size() > 0) {
+            if (way.tags().has_key("building") &&
+                !way.tags().has_key("roof:material")) {
+                BuildingWay buildingWay;
+                buildingWay.type = osmium::item_type::way;
+                buildingWay.id = way.id();
+                buildingWay.version = way.version();
+                buildingWay.first_node_id = way.nodes()[0].ref();
+
+                m_buildingWays[buildingWay.first_node_id] = buildingWay;
+            } else {
+                auto it = m_buildingRelations.find(way.id());
+                if (it != m_buildingRelations.end()) {
+                    BuildingRelation buildingRelation = it->second;
+                    BuildingWay buildingWay;
+                    buildingWay.type = osmium::item_type::relation;
+                    buildingWay.id = buildingRelation.id;
+                    buildingWay.version = buildingRelation.version;
+                    buildingWay.first_node_id = way.nodes()[0].ref();
+
+                    m_buildingWays[buildingWay.first_node_id] = buildingWay;
+                }
+            }
+        }
+    }
+
+private:
+    int m_bin;
+    int m_bin_count;
+    std::map<osmium::object_id_type, BuildingWay>& m_buildingWays;
+    const std::map<osmium::object_id_type, BuildingRelation>& m_buildingRelations;
+};
+
+struct BuildingPositionFinder : public osmium::handler::Handler {
+    BuildingPositionFinder(
+        std::map<osmium::object_id_type, BuildingWay>& buildingWays,
+        std::ostream& output_stream) :
+        m_buildingWays(buildingWays), m_output_stream(output_stream) {
+    }
+
+    void node(const osmium::Node& node) {
+        auto it = m_buildingWays.find(node.id());
+        if (it != m_buildingWays.end()) {
+            BuildingWay buildingWay = it->second;
+
+            if (buildingWay.type == osmium::item_type::relation) {
+                building_area_count++;
+            } else {
+                building_way_count++;
+            }
+            building_count++;
+
+            m_output_stream <<
+                (buildingWay.type == osmium::item_type::relation ? "relation," : "way,") <<
+                buildingWay.id << ',' << buildingWay.version << ',' <<
+                node.location().lon() << ',' << node.location().lat() << '\n';
+
+            if (building_count % 1000 == 0) {
+                m_output_stream << std::flush;
+            }
+        }
+    }
+
+private:
+    std::map<osmium::object_id_type, BuildingWay>& m_buildingWays;
+    std::ostream& m_output_stream;
 };
 
 int main(int argc, char* argv[]) {
-    if (argc != 2) {
-        std::cerr << "Usage: " << argv[0] << " OSMFILE\n";
+    if (argc != 4) {
+        std::cerr << "Usage: " << argv[0] << " osm_file bin_count output_dir\n";
         std::exit(1);
     }
 
@@ -117,37 +163,52 @@ int main(int argc, char* argv[]) {
     std::cout << std::fixed;
 
     osmium::io::File input_file{argv[1]};
+    int bin_count = std::stoi(argv[2]);
+    std::string output_dir = std::string(argv[3]);
 
-    osmium::area::Assembler::config_type assembler_config;
-    osmium::area::MultipolygonCollector<osmium::area::Assembler> collector{assembler_config};
+    std::map<osmium::object_id_type, BuildingRelation> buildingRelations;
 
-    std::cerr << "Pass 1...\n";
-    osmium::io::Reader reader1{input_file, osmium::osm_entity_bits::relation};
-    collector.read_relations(reader1);
-    reader1.close();
-    std::cerr << "Pass 1 done\n";
+    BuildingRelationFilter buildingRelationFilter{buildingRelations};
 
-    index_type index;
+    std::cerr << "Pass 0...\n";
+    osmium::io::Reader reader0{input_file};
+    osmium::apply(reader0, buildingRelationFilter);
+    reader0.close();
+    std::cerr << "Pass 0 done\n";
+    std::cerr << buildingRelations.size() << " relations selected\n";
 
-    location_handler_type location_handler{index};
-    location_handler.ignore_errors();
+    for (int bin = 0; bin < bin_count; bin++) {
+        std::cout << "Bin " << (bin + 1) << '/' << bin_count << '\n';
 
-    BuildingWayHandler building_way_handler;
-    BuildingAreaHandler building_area_handler;
+        std::string file_path = output_dir;
+        file_path += '/' + std::to_string(bin) + ".csv";
 
-    std::cout << "object_type,id,version,longitude,latitude" << std::endl;
+        std::ofstream output_file(file_path, std::ofstream::out | std::ofstream::trunc);
 
-    std::cerr << "Pass 2...\n";
-    osmium::io::Reader reader2{input_file};
-    osmium::apply(reader2,
-        location_handler,
-        building_way_handler,
-        collector.handler([&building_area_handler](osmium::memory::Buffer&& buffer) {
-            osmium::apply(buffer, building_area_handler);
-        })
-    );
-    reader2.close();
-    std::cerr << "Pass 2 done\n";
+        std::map<osmium::object_id_type, BuildingWay> buildingWays;
+
+        BuildingWayFilter buildingWayFilter{bin, bin_count, buildingWays, buildingRelations};
+
+        std::cerr << "\tPass 1...\n";
+        osmium::io::Reader reader1{input_file};
+        osmium::apply(reader1, buildingWayFilter);
+        reader1.close();
+        std::cerr << "\tPass 1 done\n";
+
+        std::cerr << '\t' << buildingWays.size() << " building ways selected in bin " << bin << '\n';
+
+        output_file << "object_type,id,version,longitude,latitude\n";
+
+        BuildingPositionFinder buildingPositionFinder{buildingWays, output_file};
+
+        std::cerr << "\tPass 2...\n";
+        osmium::io::Reader reader2{input_file};
+        osmium::apply(reader2, buildingPositionFinder);
+        reader2.close();
+        std::cerr << "\tPass 2 done\n";
+
+        output_file.close();
+    }
 
     std::cerr << building_count << " buildings (" <<
         building_way_count << " ways, " <<

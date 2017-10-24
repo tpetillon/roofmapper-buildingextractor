@@ -16,10 +16,12 @@ find_package(Threads REQUIRED)
 find_package(EXPAT REQUIRED)
 find_package(BZip2 REQUIRED)
 find_package(ZLIB REQUIRED)
+find_package(Boost REQUIRED COMPONENTS filesystem)
 
 include_directories(${EXPAT_INCLUDE_DIRS})
 include_directories(${BZIP_INCLUDE_DIRS})
-  include_directories(${ZLIB_INCLUDE_DIRS})
+include_directories(${ZLIB_INCLUDE_DIRS})
+include_directories(${Boost_INCLUDE_DIRS})
 
 add_executable(buildingextractor src/main.cpp)
 
@@ -27,3 +29,4 @@ target_link_libraries(buildingextractor Threads::Threads)
 target_link_libraries(buildingextractor ${EXPAT_LIBRARIES})
 target_link_libraries(buildingextractor ${BZIP2_LIBRARIES})
 target_link_libraries(buildingextractor ${ZLIB_LIBRARIES})
+target_link_libraries(buildingextractor Boost::filesystem)

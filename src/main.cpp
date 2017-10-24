@@ -1,23 +1,21 @@
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <limits>
-#include <algorithm>
 #include <unordered_map>
 #include <vector>
-#include <cmath>
 
-#include <osmium/io/any_input.hpp>
-
-#include <osmium/util/file.hpp>
-#include <osmium/util/progress_bar.hpp>
-
-#include <osmium/visitor.hpp>
-
-#include <osmium/osm.hpp>
+#include <boost/filesystem.hpp>
 
 #include <osmium/handler.hpp>
+#include <osmium/osm.hpp>
+#include <osmium/visitor.hpp>
+#include <osmium/io/any_input.hpp>
+#include <osmium/util/file.hpp>
+#include <osmium/util/progress_bar.hpp>
 
 int building_way_count = 0;
 int building_area_count = 0;
@@ -268,6 +266,8 @@ int main(int argc, char* argv[]) {
     int bin_count = std::stoi(argv[2]);
     double min_building_area = std::stod(argv[3]);
     std::string output_dir = std::string(argv[4]);
+
+    boost::filesystem::create_directories(output_dir);
 
     std::unordered_map<osmium::object_id_type, BuildingRelation> buildingRelations;
 
